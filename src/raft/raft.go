@@ -55,6 +55,7 @@ const (
 	electionTimeoutMin    = 400 * time.Millisecond
 	electionTimeoutMax    = 800 * time.Millisecond
 	electionCheckInterval = 10 * time.Millisecond
+	heartbeatInterval     = 150 * time.Millisecond
 )
 
 type logEntry struct {
@@ -183,6 +184,74 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderID int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.stopped() || args.Term < rf.currentTerm {
+		*reply = AppendEntriesReply{Term: rf.currentTerm}
+		return
+	}
+
+	if rf.role != follower || args.Term > rf.currentTerm {
+		DPrintf("nó %d reconheceu o líder %d no termo %d", rf.me, args.LeaderID, args.Term)
+	}
+	rf.becomeFollowerLocked(args.Term)
+	rf.resetElectionDeadlineLocked()
+	*reply = AppendEntriesReply{Term: rf.currentTerm, Success: true}
+}
+
+func (rf *Raft) runHeartbeats(term int) {
+	args := AppendEntriesArgs{Term: term, LeaderID: rf.me}
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		currentTerm, isLeader := rf.GetState()
+		if !isLeader || currentTerm != term {
+			return
+		}
+		DPrintf("nó %d iniciou rodada de heartbeats no termo %d", rf.me, term)
+		for peer := range rf.peers {
+			if peer != rf.me {
+				go rf.sendHeartbeat(peer, args)
+			}
+		}
+
+		select {
+		case <-rf.done:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (rf *Raft) sendHeartbeat(peer int, args AppendEntriesArgs) {
+	var reply AppendEntriesReply
+	if rf.stopped() || !rf.peers[peer].Call("Raft.AppendEntries", &args, &reply) {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.stopped() || reply.Term <= rf.currentTerm {
+		return
+	}
+	if rf.role == leader {
+		rf.resetElectionDeadlineLocked()
+	}
+	rf.becomeFollowerLocked(reply.Term)
+}
+
 func (rf *Raft) resetElectionDeadlineLocked() {
 	jitter := time.Duration(rand.Int63n(int64(electionTimeoutMax - electionTimeoutMin)))
 	rf.electionDeadline = time.Now().Add(electionTimeoutMin + jitter)
@@ -275,6 +344,7 @@ func (rf *Raft) promoteIfMajorityLocked() {
 	if rf.votes > len(rf.peers)/2 {
 		rf.role = leader
 		DPrintf("nó %d foi eleito líder no termo %d", rf.me, rf.currentTerm)
+		go rf.runHeartbeats(rf.currentTerm)
 	}
 }
 
