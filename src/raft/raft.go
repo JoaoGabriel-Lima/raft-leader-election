@@ -147,7 +147,30 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	*reply = RequestVoteReply{Term: rf.currentTerm}
+	if rf.stopped() || args.Term < rf.currentTerm {
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.becomeFollowerLocked(args.Term)
+		reply.Term = rf.currentTerm
+	}
+	if rf.votedFor != noVote && rf.votedFor != args.CandidateID {
+		return
+	}
+
+	lastIndex, lastTerm := rf.lastLogInfoLocked()
+	if args.LastLogTerm < lastTerm || (args.LastLogTerm == lastTerm && args.LastLogIndex < lastIndex) {
+		return
+	}
+
+	rf.votedFor = args.CandidateID
+	rf.resetElectionDeadlineLocked()
+	reply.VoteGranted = true
+	DPrintf("nó %d votou no nó %d no termo %d", rf.me, args.CandidateID, rf.currentTerm)
 }
 
 //
@@ -266,7 +289,7 @@ func (rf *Raft) lastLogInfoLocked() (int, int) {
 }
 
 func (rf *Raft) becomeFollowerLocked(term int) {
-	if term > rf.currentTerm {
+	if term >= rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = noVote
 	}
