@@ -289,7 +289,7 @@ func (rf *Raft) lastLogInfoLocked() (int, int) {
 }
 
 func (rf *Raft) becomeFollowerLocked(term int) {
-	if term >= rf.currentTerm {
+	if term > rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = noVote
 	}
